@@ -355,7 +355,7 @@ func main() {
 	emit(Frame{
 		"type":         "hello",
 		"name":         "zot-rtk",
-		"version":      "1.0.5",
+		"version":      "1.0.6",
 		"capabilities": []string{"commands", "tools"},
 	})
 
@@ -507,13 +507,22 @@ func main() {
 				continue
 			}
 
+			// Skip shell builtins that have no filesystem binary
+			if first := strings.Fields(command)[0]; first == "export" || first == "source" || first == "alias" ||
+				first == "unset" || first == "trap" || first == "exec" || first == "eval" || first == "." ||
+				first == "cd" || first == "pushd" || first == "popd" {
+				emit(Frame{"type": "event_intercept_response", "id": msg["id"]})
+				continue
+			}
+
+			cmdName := rtkPath
+			if rtkOnPATH {
+				cmdName = "rtk"
+			}
+
 			rewritten := rewriteCmd(rtkPath, command)
 			if rewritten != "" && (strings.HasPrefix(rewritten, "rtk ") || strings.HasPrefix(rewritten, "rtk\t")) {
-				// When rtk is on PATH (or symlinked there) use bare name for clean display
-				cmdName := rtkPath
-				if rtkOnPATH {
-					cmdName = "rtk"
-				}
+				// rtk knows this command — use the rewritten form with our name
 				modified := cmdName + rewritten[3:]
 				emit(Frame{
 					"type":         "event_intercept_response",
@@ -521,7 +530,14 @@ func main() {
 					"modified_args": map[string]any{"command": modified},
 				})
 			} else {
-				emit(Frame{"type": "event_intercept_response", "id": msg["id"]})
+				// rtk doesn't know this command — prepend as prefix.
+				// Shell will handle pipes, && etc; rtk filters what it can.
+				modified := cmdName + " " + command
+				emit(Frame{
+					"type":         "event_intercept_response",
+					"id":           msg["id"],
+					"modified_args": map[string]any{"command": modified},
+				})
 			}
 
 		// ---- shutdown ----
