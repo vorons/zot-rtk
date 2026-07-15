@@ -36,7 +36,10 @@ func notify(level, msg string) {
 	emit(Frame{"type": "notify", "level": level, "message": msg})
 }
 
-var stdinDec = json.NewDecoder(os.Stdin)
+var (
+	stdinDec  = json.NewDecoder(os.Stdin)
+	rtkOnPATH bool // rtk found on PATH or symlinked there
+)
 
 func readFrame() (Frame, error) {
 	var f Frame
@@ -260,18 +263,21 @@ func ensureRTK(dataDir string) string {
 	if dir, err := selfDir(); err == nil {
 		p := filepath.Join(dir, rtkBin())
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			enableRTKSymlink(p)
 			return p
 		}
 	}
 
 	// 2. Already on PATH
 	if p, err := exec.LookPath(rtkBin()); err == nil {
+		rtkOnPATH = true
 		return p
 	}
 
 	// 3. Already downloaded in data dir
 	dest := filepath.Join(dataDir, rtkBin())
 	if _, err := os.Stat(dest); err == nil {
+		enableRTKSymlink(dest)
 		return dest
 	}
 
@@ -283,7 +289,25 @@ func ensureRTK(dataDir string) string {
 		return ""
 	}
 	notify("success", "rtk ready: "+p)
+	enableRTKSymlink(p)
 	return p
+}
+
+// enableRTKSymlink creates a symlink in ~/.local/bin/ so rtk can be invoked
+// by bare name (cleaner display in intercepted bash commands).
+func enableRTKSymlink(exe string) {
+	binDir := filepath.Join(os.Getenv("HOME"), ".local", "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		notify("warn", fmt.Sprintf("mkdir %s: %v", binDir, err))
+		return
+	}
+	link := filepath.Join(binDir, rtkBin())
+	os.Remove(link)
+	if err := os.Symlink(exe, link); err != nil {
+		notify("warn", fmt.Sprintf("symlink %s -> %s: %v", link, exe, err))
+		return
+	}
+	rtkOnPATH = true
 }
 
 // ---------------------------------------------------------------------------
@@ -485,8 +509,12 @@ func main() {
 
 			rewritten := rewriteCmd(rtkPath, command)
 			if rewritten != "" && (strings.HasPrefix(rewritten, "rtk ") || strings.HasPrefix(rewritten, "rtk\t")) {
-				// Use the full path to rtk so bash doesn't need it on PATH
-				modified := rtkPath + rewritten[3:]
+				// When rtk is on PATH (or symlinked there) use bare name for clean display
+				cmdName := rtkPath
+				if rtkOnPATH {
+					cmdName = "rtk"
+				}
+				modified := cmdName + rewritten[3:]
 				emit(Frame{
 					"type":         "event_intercept_response",
 					"id":           msg["id"],
