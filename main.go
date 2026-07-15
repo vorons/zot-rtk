@@ -259,19 +259,19 @@ func selfDir() (string, error) {
 }
 
 func ensureRTK(dataDir string) string {
-	// 1. Same directory as this extension binary (bundled install)
+	// 1. Already on PATH — nothing to do, bare name works
+	if p, err := exec.LookPath(rtkBin()); err == nil {
+		rtkOnPATH = true
+		return p
+	}
+
+	// 2. Bundled next to this extension binary
 	if dir, err := selfDir(); err == nil {
 		p := filepath.Join(dir, rtkBin())
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
 			enableRTKSymlink(p)
 			return p
 		}
-	}
-
-	// 2. Already on PATH
-	if p, err := exec.LookPath(rtkBin()); err == nil {
-		rtkOnPATH = true
-		return p
 	}
 
 	// 3. Already downloaded in data dir
