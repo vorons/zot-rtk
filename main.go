@@ -36,10 +36,11 @@ func notify(level, msg string) {
 	emit(Frame{"type": "notify", "level": level, "message": msg})
 }
 
+var stdinDec = json.NewDecoder(os.Stdin)
+
 func readFrame() (Frame, error) {
 	var f Frame
-	dec := json.NewDecoder(os.Stdin)
-	if err := dec.Decode(&f); err != nil {
+	if err := stdinDec.Decode(&f); err != nil {
 		return nil, err
 	}
 	return f, nil
