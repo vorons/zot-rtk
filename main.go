@@ -355,7 +355,7 @@ func main() {
 	emit(Frame{
 		"type":         "hello",
 		"name":         "zot-rtk",
-		"version":      "1.0.3",
+		"version":      "1.0.4",
 		"capabilities": []string{"commands", "tools"},
 	})
 
