@@ -18,6 +18,12 @@ cargo, pytest, docker, kubectl, aws, and many more.
 ## Installation
 
 ```bash
+zot ext install https://github.com/vorons/zot-rtk
+```
+
+Local install:
+
+```bash
 zot ext install ./zot-rtk
 ```
 
