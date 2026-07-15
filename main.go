@@ -245,17 +245,36 @@ func copyFile(dst, src string) error {
 	return err
 }
 
+// selfDir returns the directory containing this extension's own executable.
+func selfDir() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(exe), nil
+}
+
 func ensureRTK(dataDir string) string {
-	// 1. Already on PATH
+	// 1. Same directory as this extension binary (bundled install)
+	if dir, err := selfDir(); err == nil {
+		p := filepath.Join(dir, rtkBin())
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+
+	// 2. Already on PATH
 	if p, err := exec.LookPath(rtkBin()); err == nil {
 		return p
 	}
-	// 2. Already downloaded
+
+	// 3. Already downloaded in data dir
 	dest := filepath.Join(dataDir, rtkBin())
 	if _, err := os.Stat(dest); err == nil {
 		return dest
 	}
-	// 3. Download
+
+	// 4. Download
 	notify("info", "Downloading latest rtk binary...")
 	p, err := downloadRTK(dataDir)
 	if err != nil {
@@ -465,10 +484,12 @@ func main() {
 
 			rewritten := rewriteCmd(rtkPath, command)
 			if rewritten != "" && (strings.HasPrefix(rewritten, "rtk ") || strings.HasPrefix(rewritten, "rtk\t")) {
+				// Use the full path to rtk so bash doesn't need it on PATH
+				modified := rtkPath + rewritten[3:]
 				emit(Frame{
 					"type":         "event_intercept_response",
 					"id":           msg["id"],
-					"modified_args": map[string]any{"command": rewritten},
+					"modified_args": map[string]any{"command": modified},
 				})
 			} else {
 				emit(Frame{"type": "event_intercept_response", "id": msg["id"]})
