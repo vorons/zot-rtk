@@ -1,9 +1,8 @@
 // zot-rtk — zot extension that routes bash commands through rtk.
 //
-// Uses `rtk rewrite` (the canonical rewrite engine) to decide
-// which bash commands to intercept and how to rewrite them.
-// Covers all 100+ commands rtk supports (git, ls, cat, grep, cargo,
-// docker, kubectl, aws, pytest, etc.).
+// Whitelist-based rewrite: prefixes known commands with `rtk` when
+// the model forgets. Splits command chains (&&, ||, ;, |) and rewrites
+// each segment independently. No dependency on `rtk rewrite`.
 package main
 
 import (
@@ -47,6 +46,196 @@ func readFrame() (Frame, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+// ---------------------------------------------------------------------------
+// rtk command whitelist — all commands rtk supports
+// https://github.com/rtk-ai/rtk
+// ---------------------------------------------------------------------------
+
+var rtkCommands = map[string]bool{
+	// Files
+	"ls":    true,
+	"tree":  true,
+	"cat":   true,
+	"head":  true,
+	"tail":  true,
+	"read":  true,
+	"find":  true,
+	"grep":  true,
+	"rg":    true,
+	"diff":  true,
+	"wc":    true,
+	"smart": true,
+
+	// Git
+	"git": true,
+
+	// GitHub CLI
+	"gh": true,
+
+	// Test runners
+	"jest":        true,
+	"vitest":      true,
+	"playwright":  true,
+	"pytest":      true,
+	"go":          true,
+	"rake":        true,
+	"rspec":       true,
+	"cargo":       true,
+	"ruff":        true,
+	"rustc":       true,
+	"test":        true,
+	"golangci-lint": true,
+
+	// Build & lint
+	"lint":     true,
+	"eslint":   true,
+	"prettier": true,
+	"tsc":      true,
+	"next":     true,
+	"biome":    true,
+	"rubocop":  true,
+
+	// Package managers
+	"pnpm":   true,
+	"npm":    true,
+	"npx":    true,
+	"yarn":   true,
+	"bun":    true,
+	"pip":    true,
+	"uv":     true,
+	"bundle": true,
+	"prisma": true,
+	"dotnet": true,
+
+	// AWS
+	"aws": true,
+
+	// Containers
+	"docker":   true,
+	"kubectl":  true,
+	"oc":       true,
+
+	// Infrastructure as Code
+	"pulumi": true,
+
+	// Data & misc
+	"psql":   true,
+	"curl":   true,
+	"wget":   true,
+	"jq":     true,
+	"tmux":   true,
+	"screen": true,
+	"ssh":    true,
+	"tar":    true,
+	"zip":    true,
+	"unzip":  true,
+	"make":   true,
+	"cmake":  true,
+	"meson":  true,
+	"ninja":  true,
+	"just":   true,
+	"task":   true,
+}
+
+// ---------------------------------------------------------------------------
+// Command chain splitting and rewriting
+// ---------------------------------------------------------------------------
+
+var chainOps = map[string]bool{
+	"&&": true,
+	"||": true,
+	";":  true,
+	"|":  true,
+}
+
+// splitChain splits a command line at top-level shell operators (&&, ||, ;, |),
+// keeping operators as their own tokens. Operators inside quotes are ignored.
+// Returns nil on unbalanced quotes (caller should skip rewriting).
+func splitChain(command string) []string {
+	var out []string
+	var buf strings.Builder
+	var quote byte // 0 = not in quotes
+
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+
+		if quote != 0 {
+			buf.WriteByte(c)
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+
+		if c == '\'' || c == '"' {
+			quote = c
+			buf.WriteByte(c)
+			continue
+		}
+
+		// Two-char operators: &&, ||
+		if i+1 < len(command) {
+			pair := command[i : i+2]
+			if pair == "&&" || pair == "||" {
+				out = append(out, buf.String(), pair)
+				buf.Reset()
+				i++
+				continue
+			}
+		}
+
+		// Single-char operators: ; |
+		if c == ';' || c == '|' {
+			out = append(out, buf.String(), string(c))
+			buf.Reset()
+			continue
+		}
+
+		buf.WriteByte(c)
+	}
+
+	if quote != 0 {
+		return nil // unbalanced quote
+	}
+	out = append(out, buf.String())
+	return out
+}
+
+// rewriteChain prefixes each command segment with `rtk` when its first word
+// is a known RTK command and it is not already prefixed. Operators are preserved.
+func rewriteChain(command string) string {
+	parts := splitChain(command)
+	if parts == nil {
+		return command // unparseable — leave untouched
+	}
+
+	changed := false
+	for i, part := range parts {
+		if chainOps[strings.TrimSpace(part)] {
+			continue
+		}
+
+		leading := strings.TrimLeft(part, " \t")
+		indent := part[:len(part)-len(leading)]
+		if leading == "" {
+			continue
+		}
+
+		firstWord := strings.Fields(leading)[0]
+		if firstWord == "rtk" || !rtkCommands[firstWord] {
+			continue
+		}
+
+		parts[i] = indent + "rtk " + leading
+		changed = true
+	}
+
+	if !changed {
+		return command
+	}
+	return strings.Join(parts, "")
 }
 
 // ---------------------------------------------------------------------------
@@ -107,7 +296,6 @@ func downloadRTK(dataDir string) (string, error) {
 		return "", fmt.Errorf("unsupported: %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 
-	// Fetch latest release
 	url := "https://api.github.com/repos/rtk-ai/rtk/releases/latest"
 	resp, err := httpDo(url)
 	if err != nil {
@@ -174,7 +362,6 @@ func downloadRTK(dataDir string) (string, error) {
 		return "", fmt.Errorf("save archive: %w", err)
 	}
 
-	// Only tar.gz is supported; zip extraction for Windows is TODO.
 	if strings.HasSuffix(archiveName, ".tar.gz") {
 		if err := extractTarGz(arcPath, tmp); err != nil {
 			return "", fmt.Errorf("extract archive: %w", err)
@@ -187,7 +374,6 @@ func downloadRTK(dataDir string) (string, error) {
 	}
 
 	if err := os.Rename(bin, dest); err != nil {
-		// cross-device link fallback
 		if e := copyFile(dest, bin); e != nil {
 			return "", fmt.Errorf("rename: %v; copy fallback: %w", err, e)
 		}
@@ -249,7 +435,6 @@ func copyFile(dst, src string) error {
 	return err
 }
 
-// selfDir returns the directory containing this extension's own executable.
 func selfDir() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -259,13 +444,11 @@ func selfDir() (string, error) {
 }
 
 func ensureRTK(dataDir string) string {
-	// 1. Already on PATH — nothing to do, bare name works
 	if p, err := exec.LookPath(rtkBin()); err == nil {
 		rtkOnPATH = true
 		return p
 	}
 
-	// 2. Bundled next to this extension binary
 	if dir, err := selfDir(); err == nil {
 		p := filepath.Join(dir, rtkBin())
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
@@ -274,14 +457,12 @@ func ensureRTK(dataDir string) string {
 		}
 	}
 
-	// 3. Already downloaded in data dir
 	dest := filepath.Join(dataDir, rtkBin())
 	if _, err := os.Stat(dest); err == nil {
 		enableRTKSymlink(dest)
 		return dest
 	}
 
-	// 4. Download
 	notify("info", "Downloading latest rtk binary...")
 	p, err := downloadRTK(dataDir)
 	if err != nil {
@@ -293,8 +474,6 @@ func ensureRTK(dataDir string) string {
 	return p
 }
 
-// enableRTKSymlink creates a symlink in ~/.local/bin/ so rtk can be invoked
-// by bare name (cleaner display in intercepted bash commands).
 func enableRTKSymlink(exe string) {
 	binDir := filepath.Join(os.Getenv("HOME"), ".local", "bin")
 	if err := os.MkdirAll(binDir, 0755); err != nil {
@@ -311,29 +490,9 @@ func enableRTKSymlink(exe string) {
 }
 
 // ---------------------------------------------------------------------------
-// rtk rewrite integration
+// rtk execution
 // ---------------------------------------------------------------------------
 
-// rewriteCmd uses `rtk rewrite` as the canonical decision engine.
-// rtk rewrite exits 3 when no hook is installed, but stdout still
-// contains the correctly rewritten command — so we always read it.
-func rewriteCmd(rtkPath, command string) string {
-	if rtkPath == "" || command == "" {
-		return ""
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, rtkPath, "rewrite", command)
-	out, _ := cmd.Output() // ignore exit code; stdout is valid even on status 3
-	r := strings.TrimSpace(string(out))
-	if r == "" {
-		return ""
-	}
-	return r
-}
-
-// runRTK executes a command through rtk and returns output.
 func runRTK(ctx context.Context, rtkPath, command string) (string, error) {
 	args := strings.Fields(command) // ponytail: naive split, no shell syntax
 	cmd := exec.CommandContext(ctx, rtkPath, args...)
@@ -355,7 +514,7 @@ func main() {
 	emit(Frame{
 		"type":         "hello",
 		"name":         "zot-rtk",
-		"version":      "1.0.6",
+		"version":      "1.1.0",
 		"capabilities": []string{"commands", "tools"},
 	})
 
@@ -487,7 +646,7 @@ func main() {
 				"is_error": isErr,
 				"content":  []any{Frame{"type": "text", "text": text}}})
 
-		// ---- bash interception via rtk rewrite ----
+		// ---- bash interception — whitelist-based rewrite ----
 		case "event_intercept":
 			event, _ := msg["event"].(string)
 			if event != "tool_call" {
@@ -507,38 +666,18 @@ func main() {
 				continue
 			}
 
-			// Skip shell builtins that have no filesystem binary
-			if first := strings.Fields(command)[0]; first == "export" || first == "source" || first == "alias" ||
-				first == "unset" || first == "trap" || first == "exec" || first == "eval" || first == "." ||
-				first == "cd" || first == "pushd" || first == "popd" {
+			rewritten := rewriteChain(command)
+			if rewritten == command {
+				// Nothing to rewrite — pass through as-is
 				emit(Frame{"type": "event_intercept_response", "id": msg["id"]})
 				continue
 			}
 
-			cmdName := rtkPath
-			if rtkOnPATH {
-				cmdName = "rtk"
-			}
-
-			rewritten := rewriteCmd(rtkPath, command)
-			if rewritten != "" && (strings.HasPrefix(rewritten, "rtk ") || strings.HasPrefix(rewritten, "rtk\t")) {
-				// rtk knows this command — use the rewritten form with our name
-				modified := cmdName + rewritten[3:]
-				emit(Frame{
-					"type":         "event_intercept_response",
-					"id":           msg["id"],
-					"modified_args": map[string]any{"command": modified},
-				})
-			} else {
-				// rtk doesn't know this command — prepend as prefix.
-				// Shell will handle pipes, && etc; rtk filters what it can.
-				modified := cmdName + " " + command
-				emit(Frame{
-					"type":         "event_intercept_response",
-					"id":           msg["id"],
-					"modified_args": map[string]any{"command": modified},
-				})
-			}
+			emit(Frame{
+				"type":         "event_intercept_response",
+				"id":           msg["id"],
+				"modified_args": map[string]any{"command": rewritten},
+			})
 
 		// ---- shutdown ----
 		case "shutdown":

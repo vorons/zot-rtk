@@ -1,6 +1,6 @@
 {
   "name": "zot-rtk",
-  "version": "1.0.6",
+  "version": "1.1.0",
   "exec": "./zot-rtk",
   "language": "go",
   "description": "Routes bash commands through rtk (Rust Token Killer) — reduces token consumption by 60-90% on 100+ commands",
