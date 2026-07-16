@@ -494,8 +494,10 @@ func enableRTKSymlink(exe string) {
 // ---------------------------------------------------------------------------
 
 func runRTK(ctx context.Context, rtkPath, command string) (string, error) {
-	args := strings.Fields(command) // ponytail: naive split, no shell syntax
-	cmd := exec.CommandContext(ctx, rtkPath, args...)
+	// ponytail: run through sh so &&, ||, |, ; are shell operators, not
+	// literal argv entries.  strings.Fields split caused e.g. `cd /path && git
+	// log` to pass "&&" directly to /usr/bin/cd → "too many arguments".
+	cmd := exec.CommandContext(ctx, "sh", "-c", rtkPath+" "+command)
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -514,7 +516,7 @@ func main() {
 	emit(Frame{
 		"type":         "hello",
 		"name":         "zot-rtk",
-		"version":      "1.1.0",
+		"version":      "1.1.1",
 		"capabilities": []string{"commands", "tools"},
 	})
 
