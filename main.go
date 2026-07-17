@@ -53,6 +53,96 @@ func readFrame() (Frame, error) {
 // https://github.com/rtk-ai/rtk
 // ---------------------------------------------------------------------------
 
+// unsupportedFindFlags lists native find flags that rtk find cannot handle.
+// When detected, the command is passed to native find instead of rtk find.
+// Source: https://github.com/rtk-ai/rtk/blob/develop/src/cmds/system/find_cmd.rs
+var unsupportedFindFlags = []string{
+	// Logical operators
+	"-not", "!", "-or", "-o", "-and", "-a",
+
+	// Actions
+	"-exec", "-execdir", "-ok", "-okdir",
+	"-delete", "-print0", "-printf", "-fprint", "-fprint0", "-fprintf",
+	"-ls", "-fls",
+
+	// File size, permissions, links
+	"-size",
+	"-perm",
+	"-links", "-lname", "-ilname", "-inum", "-samefile",
+
+	// Time predicates
+	"-newer", "-anewer", "-cnewer",
+	"-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin",
+	"-used",
+
+	// Empty / exists
+	"-empty",
+
+	// Ownership
+	"-gid", "-uid", "-group", "-nogroup", "-nouser",
+
+	// Filesystem
+	"-fstype",
+
+	// Regex / path matching
+	"-regex", "-iregex",
+
+	// Prune
+	"-prune",
+
+	// Options that rtk silently ignores
+	"-L", "-follow", "-depth", "-ignore_readdir_race", "-regextype",
+	"-mindepth",
+}
+
+// hasUnsupportedFindFlags tokenises cmd (respecting quotes) and checks whether
+// any unsupported find flag appears as a standalone token.
+func hasUnsupportedFindFlags(cmd string) bool {
+	// Quick bail-out: none of the flags appear as substrings at all.
+	// We look for '-' prefix to avoid O(n*m) scan on every command.
+	if !strings.Contains(cmd, "-") && !strings.Contains(cmd, "!") {
+		return false
+	}
+
+	// Tokenise respecting single and double quotes.
+	// This avoids false positives when a flag appears inside a value or a string.
+	var quote byte
+	tokens := strings.Fields(cmd)
+	// Fields splits on whitespace, which already handles basic cases.
+	// We only need to skip tokens that are inside quotes — but since Fields
+	// splits on whitespace even inside quotes, we reconstruct quoted regions.
+	// Simpler: just check each field after stripping surrounding quotes.
+	for _, tok := range tokens {
+		// Track whether we're inside a quoted region that spans multiple fields
+		if quote != 0 {
+			// End of quoted region
+			if len(tok) > 0 && tok[len(tok)-1] == quote {
+				quote = 0
+			}
+			continue
+		}
+
+		stripped := tok
+		if len(stripped) > 0 && (stripped[0] == '"' || stripped[0] == '\'') {
+			q := stripped[0]
+			if len(stripped) > 1 && stripped[len(stripped)-1] == q {
+				// Fully quoted token — skip it entirely
+				continue
+			}
+			// Starts quote but doesn't end it — spanning multiple fields
+			quote = q
+			continue
+		}
+
+		for _, f := range unsupportedFindFlags {
+			if stripped == f {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 var rtkCommands = map[string]bool{
 	// Files
 	"ls":    true,
@@ -225,6 +315,12 @@ func rewriteChain(command string) string {
 
 		firstWord := strings.Fields(leading)[0]
 		if firstWord == "rtk" || !rtkCommands[firstWord] {
+			continue
+		}
+
+		// For find, check if any unsupported native flags are present.
+		// If so, skip rtk and let the command pass through to native find.
+		if firstWord == "find" && hasUnsupportedFindFlags(leading) {
 			continue
 		}
 
@@ -516,7 +612,7 @@ func main() {
 	emit(Frame{
 		"type":         "hello",
 		"name":         "zot-rtk",
-		"version":      "1.1.1",
+		"version":      "1.2.0",
 		"capabilities": []string{"commands", "tools"},
 	})
 
